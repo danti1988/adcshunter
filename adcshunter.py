@@ -12,7 +12,7 @@ def find_rpcdump_tool():
     elif shutil.which("impacket-rpcdump"):
         return "impacket-rpcdump"
     else:
-        print("Neither 'rpcdump.py' nor 'impacket-rpcdump' is installed.")
+        print("Neither 'rpcdump.py' or 'impacket-rpcdump' is installed.")
         print("Please install impacket to use this tool.")
         exit(1)
 
@@ -22,9 +22,12 @@ def make_http_request(ip):
     url = f"http://{ip}/certsrv/certsnsh.asp"
     try:
         response = requests.get(url, timeout=10)
-        return response.text, None if response.status_code == 200 else "Error accessing Web Enrollment endpoint"
+        if "401 - Unauthorized: Access is denied due to invalid credentials" in response.text:
+            return True, None  # Indicates potential vulnerability
+        else:
+            return False, "Web Enrollment endpoint not vulnerable or not accessible"
     except requests.RequestException as e:
-        return None, str(e)
+        return False, str(e)
 
 def worker(ip_queue, progress):
     while True:
@@ -41,8 +44,8 @@ def worker(ip_queue, progress):
             if output:
                 output_decoded = output.decode('utf-8')
                 if 'certsrv.exe' in output_decoded.lower():
-                    http_output, http_error = make_http_request(ip)
-                    if http_output and "401 - Unauthorized: Access is denied due to invalid credentials" in http_output:
+                    is_vulnerable, http_error = make_http_request(ip)
+                    if is_vulnerable:
                         print(f"\033[91mVulnerable Web Enrollment endpoint identified: http://{ip}/certsrv/certsnsh.asp\033[0m")
                     elif http_error:
                         print(f"Error accessing Web Enrollment endpoint for {ip}: {http_error}")
