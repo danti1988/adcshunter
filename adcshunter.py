@@ -4,6 +4,7 @@ import queue
 import ipaddress
 import os
 import shutil
+import requests
 
 def find_rpcdump_tool():
     if shutil.which("rpcdump.py"):
@@ -17,21 +18,13 @@ def find_rpcdump_tool():
 
 RPCDUMP_TOOL = find_rpcdump_tool()
 
-def make_curl_request(ip):
+def make_http_request(ip):
+    url = f"http://{ip}/certsrv/certsnsh.asp"
     try:
-        url = f"http://{ip}/certsrv/certsnsh.asp"
-        result = subprocess.Popen(f"curl {url}", 
-                                  shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        output, error = result.communicate(timeout=10)
-
-        if output:
-            return output.decode('utf-8'), None
-        else:
-            return None, error.decode('utf-8')
-    except subprocess.TimeoutExpired:
-        return None, "Curl request timed out"
-    except Exception as e:
-        return None, f"Error in curl request: {e}"
+        response = requests.get(url, timeout=10)
+        return response.text, None if response.status_code == 200 else "Error accessing Web Enrollment endpoint"
+    except requests.RequestException as e:
+        return None, str(e)
 
 def worker(ip_queue, progress):
     while True:
@@ -48,11 +41,11 @@ def worker(ip_queue, progress):
             if output:
                 output_decoded = output.decode('utf-8')
                 if 'certsrv.exe' in output_decoded.lower():
-                    curl_output, curl_error = make_curl_request(ip)
-                    if curl_output and "401 - Unauthorized: Access is denied due to invalid credentials" in curl_output:
+                    http_output, http_error = make_http_request(ip)
+                    if http_output and "401 - Unauthorized: Access is denied due to invalid credentials" in http_output:
                         print(f"\033[91mVulnerable Web Enrollment endpoint identified: http://{ip}/certsrv/certsnsh.asp\033[0m")
-                    elif curl_error:
-                        print(f"Error accessing Web Enrollment endpoint for {ip}: {curl_error}")
+                    elif http_error:
+                        print(f"Error accessing Web Enrollment endpoint for {ip}: {http_error}")
             if error:
                 print(f"Error for {ip}:\n{error.decode('utf-8')}")
         except subprocess.TimeoutExpired:
@@ -71,7 +64,6 @@ def run_rpcdump_concurrently(ip_list):
     num_worker_threads = 10
     ip_queue = queue.Queue()
 
-    # Shared progress counter
     class Progress:
         def __init__(self, total):
             self.value = 0
