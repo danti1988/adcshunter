@@ -3,6 +3,19 @@ import threading
 import queue
 import ipaddress
 import os
+import shutil
+
+def find_rpcdump_tool():
+    if shutil.which("rpcdump.py"):
+        return "rpcdump.py"
+    elif shutil.which("impacket-rpcdump"):
+        return "impacket-rpcdump"
+    else:
+        print("Neither 'rpcdump.py' nor 'impacket-rpcdump' is installed.")
+        print("Please install impacket to use this tool.")
+        exit(1)
+
+RPCDUMP_TOOL = find_rpcdump_tool()
 
 def make_curl_request(ip):
     try:
@@ -27,7 +40,7 @@ def worker(ip_queue, progress):
             break
 
         try:
-            command = f"rpcdump.py {ip}"
+            command = f"{RPCDUMP_TOOL} {ip}"
             result = subprocess.Popen(command, 
                                       shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             output, error = result.communicate(timeout=10)
