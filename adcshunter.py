@@ -12,7 +12,7 @@ def find_rpcdump_tool():
     elif shutil.which("impacket-rpcdump"):
         return "impacket-rpcdump"
     else:
-        print("Neither 'rpcdump.py' or 'impacket-rpcdump' is installed.")
+        print("Neither 'rpcdump.py' nor 'impacket-rpcdump' is installed.")
         print("Please install impacket to use this tool.")
         exit(1)
 
@@ -44,6 +44,9 @@ def worker(ip_queue, progress):
             if output:
                 output_decoded = output.decode('utf-8')
                 if 'certsrv.exe' in output_decoded.lower():
+                    print(f"\033[91mADCS Server location identified on IP {ip}\033[0m")
+                    print(f"\033[91mChecking ESC8\033[0m")
+                    
                     is_vulnerable, http_error = make_http_request(ip)
                     if is_vulnerable:
                         print(f"\033[91mVulnerable Web Enrollment endpoint identified: http://{ip}/certsrv/certsnsh.asp\033[0m")
