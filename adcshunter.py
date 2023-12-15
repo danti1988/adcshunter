@@ -12,7 +12,7 @@ def find_rpcdump_tool():
     elif shutil.which("impacket-rpcdump"):
         return "impacket-rpcdump"
     else:
-        print("Neither 'rpcdump.py' nor 'impacket-rpcdump' is installed.")
+        print("Neither 'rpcdump.py' or 'impacket-rpcdump' is installed.")
         print("Please install impacket to use this tool.")
         exit(1)
 
