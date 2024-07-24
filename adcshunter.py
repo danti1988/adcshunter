@@ -19,7 +19,7 @@ def find_rpcdump_tool():
 RPCDUMP_TOOL = find_rpcdump_tool()
 
 def make_http_request(ip):
-    url = f"http://{ip}/certsrv/certsnsh.asp"
+    url = f"http://{ip}/certsrv/certfnsh.asp"
     try:
         response = requests.get(url, timeout=10)
         if "401 - Unauthorized: Access is denied due to invalid credentials" in response.text:
