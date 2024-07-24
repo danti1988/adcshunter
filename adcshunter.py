@@ -49,7 +49,7 @@ def worker(ip_queue, progress):
                     
                     is_vulnerable, http_error = make_http_request(ip)
                     if is_vulnerable:
-                        print(f"\033[91mVulnerable Web Enrollment endpoint identified: http://{ip}/certsrv/certsnsh.asp\033[0m")
+                        print(f"\033[91mVulnerable Web Enrollment endpoint identified: http://{ip}/certsrv/certfnsh.asp\033[0m")
                     elif http_error:
                         print(f"Error accessing Web Enrollment endpoint for {ip}: {http_error}")
             if error:
