@@ -11,6 +11,11 @@ from impacket.dcerpc.v5 import transport, epm
 # Initialize logging
 logging.basicConfig(level=logging.CRITICAL)  # Suppress all logging output
 
+# Global print lock and vulnerable targets list
+print_lock = threading.Lock()
+vulnerable_targets = []
+vulnerable_targets_lock = threading.Lock()
+
 def make_http_request(ip):
     url = f"http://{ip}/certsrv/certfnsh.asp"
     try:
@@ -99,8 +104,13 @@ def worker(ip_queue, progress):
         if ip is None:
             break
 
+        # Initialize a list to accumulate messages
+        output_messages = []
+
         # Output the IP or hostname currently being tested
-        print(f"Testing {ip}")
+        output_messages.append(f"Testing {ip}")
+
+        found_vulnerable = False  # Flag to check if vulnerability was found
 
         try:
             dumper = RPCDump(port=135)
@@ -125,19 +135,27 @@ def worker(ip_queue, progress):
                 for endpoint in endpoints:
                     exe_name = endpoints[endpoint]['EXE'].lower()
                     if 'certsrv.exe' in exe_name:
-                        print(f"\nADCS Server identified on {ip}")
-                        print(f"Checking for ESC8 vulnerability on {ip}")
+                        output_messages.append(f"\nADCS Server identified on {ip}")
+                        output_messages.append(f"Checking for ESC8 vulnerability on {ip}")
 
                         is_vulnerable, _ = make_http_request(ip)
                         if is_vulnerable:
-                            print(f"Vulnerable Web Enrollment endpoint found: http://{ip}/certsrv/certfnsh.asp\n")
+                            output_messages.append(f"Vulnerable Web Enrollment endpoint found: http://{ip}/certsrv/certfnsh.asp\n")
+                            # Add the vulnerable target to the list
+                            with vulnerable_targets_lock:
+                                vulnerable_targets.append(ip)
+                            found_vulnerable = True
                         else:
-                            print(f"No vulnerability found on {ip}\n")
+                            output_messages.append(f"No vulnerability found on {ip}\n")
                         break  # Exit after finding certsrv.exe
             else:
                 pass  # No endpoints found; do not output
         except Exception:
             pass  # Suppress exceptions to reduce verbose output
+
+        # Print all messages at once
+        with print_lock:
+            print('\n'.join(output_messages))
 
         with progress.get_lock():
             progress.value += 1
@@ -189,13 +207,30 @@ def main():
             with open(user_input, 'r') as file:
                 for line in file:
                     ip_list.extend(parse_input_line(line.strip()))
+            # Remove duplicate IPs
+            ip_list = list(set(ip_list))
             run_rpcdump_concurrently(ip_list)
         else:
             ip_list = parse_input_line(user_input)
             if ip_list:
+                ip_list = list(set(ip_list))
                 run_rpcdump_concurrently(ip_list)
             else:
                 print("Invalid input. Please enter a valid file path, CIDR range, IP address, or hostname.")
+
+        # After scanning is complete, output the command if vulnerabilities were found
+        if vulnerable_targets:
+            with print_lock:
+                print("\nVulnerable targets found:")
+                for target in vulnerable_targets:
+                    print(f" - {target}")
+                print("\nYou can use the following command(s):")
+                for target in vulnerable_targets:
+                    print(f"impacket-ntlmrelayx -t http://{target}/certsrv/certfnsh.asp -smb2support --adcs --template 'user'")
+        else:
+            with print_lock:
+                print("\nNo vulnerable targets were found.")
+
     except KeyboardInterrupt:
         print("\nOperation interrupted by user. Exiting gracefully.")
 
