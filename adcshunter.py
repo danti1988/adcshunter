@@ -1,33 +1,97 @@
-import subprocess
+import argparse
 import threading
 import queue
 import ipaddress
 import os
-import shutil
 import requests
+import logging
+from impacket import uuid
+from impacket.dcerpc.v5 import transport, epm
 
-def find_rpcdump_tool():
-    if shutil.which("rpcdump.py"):
-        return "rpcdump.py"
-    elif shutil.which("impacket-rpcdump"):
-        return "impacket-rpcdump"
-    else:
-        print("Neither 'rpcdump.py' or 'impacket-rpcdump' is installed.")
-        print("Please install impacket to use this tool.")
-        exit(1)
-
-RPCDUMP_TOOL = find_rpcdump_tool()
+# Initialize logging
+logging.basicConfig(level=logging.CRITICAL)  # Suppress all logging output
 
 def make_http_request(ip):
     url = f"http://{ip}/certsrv/certfnsh.asp"
     try:
         response = requests.get(url, timeout=10)
-        if "401 - Unauthorized: Access is denied due to invalid credentials" in response.text:
+        if response.status_code == 401 and "Access is denied" in response.text:
             return True, None  # Indicates potential vulnerability
         else:
-            return False, "Web Enrollment endpoint not vulnerable or not accessible"
-    except requests.RequestException as e:
-        return False, str(e)
+            return False, None
+    except requests.RequestException:
+        return False, None
+
+def parse_input_line(line):
+    line = line.strip()
+    if not line:
+        return []
+    try:
+        if '/' in line:
+            return [str(ip) for ip in ipaddress.ip_network(line, strict=False)]
+        else:
+            ipaddress.ip_address(line)
+            return [line]
+    except ValueError:
+        # Line is not an IP address or CIDR, assume it's a hostname
+        return [line]
+
+def is_valid_ip(input_string):
+    try:
+        ipaddress.ip_address(input_string)
+        return True
+    except ValueError:
+        return False
+
+class RPCDump:
+    KNOWN_PROTOCOLS = {
+        135: {'bindstr': r'ncacn_ip_tcp:%s[135]'},
+        139: {'bindstr': r'ncacn_np:%s[\pipe\epmapper]'},
+        443: {'bindstr': r'ncacn_http:[593,RpcProxy=%s:443]'},
+        445: {'bindstr': r'ncacn_np:%s[\pipe\epmapper]'},
+        593: {'bindstr': r'ncacn_http:%s'}
+    }
+
+    def __init__(self, username='', password='', domain='', hashes=None, port=135):
+        self.__username = username
+        self.__password = password
+        self.__domain = domain
+        self.__lmhash = ''
+        self.__nthash = ''
+        self.__port = port
+        self.__stringbinding = ''
+        if hashes is not None:
+            self.__lmhash, self.__nthash = hashes.split(':')
+
+    def dump(self, remoteName, remoteHost):
+        entries = []
+
+        self.__stringbinding = self.KNOWN_PROTOCOLS[self.__port]['bindstr'] % remoteName
+        rpctransport = transport.DCERPCTransportFactory(self.__stringbinding)
+
+        if self.__port in [139, 445]:
+            rpctransport.set_credentials(self.__username, self.__password, self.__domain,
+                                         self.__lmhash, self.__nthash)
+            rpctransport.setRemoteHost(remoteHost)
+            rpctransport.set_dport(self.__port)
+        elif self.__port in [443]:
+            rpctransport.set_credentials(self.__username, self.__password, self.__domain,
+                                         self.__lmhash, self.__nthash)
+            rpctransport.set_auth_type(transport.HTTPTransport.AUTH_NTLM)
+
+        try:
+            entries = self.__fetchList(rpctransport)
+        except Exception:
+            pass  # Suppress exceptions to reduce verbose output
+
+        return entries
+
+    def __fetchList(self, rpctransport):
+        dce = rpctransport.get_dce_rpc()
+        dce.connect()
+        resp = epm.hept_lookup(None, dce=dce)
+        dce.disconnect()
+        return resp
 
 def worker(ip_queue, progress):
     while True:
@@ -35,35 +99,48 @@ def worker(ip_queue, progress):
         if ip is None:
             break
 
-        try:
-            command = f"{RPCDUMP_TOOL} {ip}"
-            result = subprocess.Popen(command, 
-                                      shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            output, error = result.communicate(timeout=10)
+        # Output the IP or hostname currently being tested
+        print(f"Testing {ip}")
 
-            if output:
-                output_decoded = output.decode('utf-8')
-                if 'certsrv.exe' in output_decoded.lower():
-                    print(f"\033[91mADCS Server location identified on IP {ip}\033[0m")
-                    print(f"\033[91mChecking ESC8\033[0m")
-                    
-                    is_vulnerable, http_error = make_http_request(ip)
-                    if is_vulnerable:
-                        print(f"\033[91mVulnerable Web Enrollment endpoint identified: http://{ip}/certsrv/certfnsh.asp\033[0m")
-                    elif http_error:
-                        print(f"Error accessing Web Enrollment endpoint for {ip}: {http_error}")
-            if error:
-                print(f"Error for {ip}:\n{error.decode('utf-8')}")
-        except subprocess.TimeoutExpired:
-            print(f"Timeout expired for {ip}")
-            result.kill()
-        except Exception as e:
-            print(f"Error running {command} on {ip}: {e}")
-        
+        try:
+            dumper = RPCDump(port=135)
+            entries = dumper.dump(ip, ip)
+            if entries:
+                endpoints = {}
+                for entry in entries:
+                    binding = epm.PrintStringBinding(entry['tower']['Floors'])
+                    tmpUUID = str(entry['tower']['Floors'][0])
+                    if tmpUUID not in endpoints:
+                        endpoints[tmpUUID] = {}
+                        endpoints[tmpUUID]['Bindings'] = []
+                    uuid_bin = uuid.uuidtup_to_bin(uuid.string_to_uuidtup(tmpUUID))[:18]
+                    if uuid_bin in epm.KNOWN_UUIDS:
+                        endpoints[tmpUUID]['EXE'] = epm.KNOWN_UUIDS[uuid_bin]
+                    else:
+                        endpoints[tmpUUID]['EXE'] = 'N/A'
+                    endpoints[tmpUUID]['annotation'] = entry['annotation'][:-1].decode('utf-8')
+                    endpoints[tmpUUID]['Bindings'].append(binding)
+
+                # Check if 'certsrv.exe' is among the endpoints
+                for endpoint in endpoints:
+                    exe_name = endpoints[endpoint]['EXE'].lower()
+                    if 'certsrv.exe' in exe_name:
+                        print(f"\nADCS Server identified on {ip}")
+                        print(f"Checking for ESC8 vulnerability on {ip}")
+
+                        is_vulnerable, _ = make_http_request(ip)
+                        if is_vulnerable:
+                            print(f"Vulnerable Web Enrollment endpoint found: http://{ip}/certsrv/certfnsh.asp\n")
+                        else:
+                            print(f"No vulnerability found on {ip}\n")
+                        break  # Exit after finding certsrv.exe
+            else:
+                pass  # No endpoints found; do not output
+        except Exception:
+            pass  # Suppress exceptions to reduce verbose output
+
         with progress.get_lock():
             progress.value += 1
-            print(f"Scanned {progress.value}/{progress.total}", end='\r')
-
         ip_queue.task_done()
 
 def run_rpcdump_concurrently(ip_list):
@@ -84,6 +161,7 @@ def run_rpcdump_concurrently(ip_list):
     threads = []
     for _ in range(num_worker_threads):
         t = threading.Thread(target=worker, args=(ip_queue, progress))
+        t.daemon = True
         t.start()
         threads.append(t)
 
@@ -92,50 +170,32 @@ def run_rpcdump_concurrently(ip_list):
             ip_queue.put(ip.strip())
 
         ip_queue.join()
-
-        for _ in range(num_worker_threads):
-            ip_queue.put(None)
-        for t in threads:
-            t.join()
     except KeyboardInterrupt:
-        print("\nScan interrupted by user. Exiting gracefully.")
         for _ in range(num_worker_threads):
             ip_queue.put(None)
         for t in threads:
             t.join()
-    except Exception as e:
-        print(f"\nAn error occurred: {e}")
-
-def parse_input_line(line):
-    if '/' in line:  # CIDR range
-        return [str(ip) for ip in ipaddress.ip_network(line, strict=False)]
-    elif is_valid_ip(line):  # Single IP
-        return [line]
-    else:
-        return []
-
-def is_valid_ip(input_string):
-    try:
-        ipaddress.ip_address(input_string)
-        return True
-    except ValueError:
-        return False
 
 def main():
     try:
-        user_input = input("Enter a file path, CIDR range, or an IP address: ")
-        
+        parser = argparse.ArgumentParser(description='Script to scan for vulnerable Web Enrollment endpoints.')
+        parser.add_argument('-t', '--target', required=True, help='File path, CIDR range, IP address, or hostname to scan.')
+        args = parser.parse_args()
+
+        user_input = args.target
+
         if os.path.isfile(user_input):
             ip_list = []
             with open(user_input, 'r') as file:
                 for line in file:
                     ip_list.extend(parse_input_line(line.strip()))
             run_rpcdump_concurrently(ip_list)
-        elif is_valid_ip(user_input) or '/' in user_input:  # Single IP or CIDR
-            ip_list = parse_input_line(user_input)
-            run_rpcdump_concurrently(ip_list)
         else:
-            print("Invalid input. Please enter a valid file path, CIDR range, or IP address.")
+            ip_list = parse_input_line(user_input)
+            if ip_list:
+                run_rpcdump_concurrently(ip_list)
+            else:
+                print("Invalid input. Please enter a valid file path, CIDR range, IP address, or hostname.")
     except KeyboardInterrupt:
         print("\nOperation interrupted by user. Exiting gracefully.")
 
